@@ -1,98 +1,134 @@
+# 🔐 Auth Microservice
+
 <p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
+  <img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" />
 </p>
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
-
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
+<p align="center">
+  Microservicio de autenticación, construido con <a href="http://nestjs.com/" target="blank">NestJS</a>, <a href="https://www.prisma.io/" target="blank">Prisma ORM</a> sobre MongoDB y JWT.
 </p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
 
-## Description
+---
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+**No expone HTTP.** Solo escucha NATS. Es el único lugar del sistema donde se firman y verifican los JWT: el gateway no conoce `JWT_SECRET` ni tiene `@nestjs/jwt`.
 
-## Project setup
+## 📬 Message Patterns
 
-```bash
-$ npm install
-```
+Usa **strings con puntos**, igual que `payments-ms`.
 
-## Compile and run the project
+| Patrón | Hace |
+|---|---|
+| `auth.register.user` | Crea el usuario, hashea con bcrypt y devuelve `{ user, token }` |
+| `auth.login.user` | Valida credenciales y devuelve `{ user, token }` |
+| `auth.verify.user` | Verifica el token y devuelve `{ user, token }` con un token **nuevo** |
 
-```bash
-# development
-$ npm run start
+En los tres casos la contraseña se saca del objeto antes de responder: el gateway reenvía los payloads tal cual.
 
-# watch mode
-$ npm run start:dev
+## 🔄 Revalidación y renovación
 
-# production mode
-$ npm run start:prod
-```
+`auth.verify.user` no devuelve el token que recibió: devuelve uno **recién firmado**. Así una sesión activa se va renovando sola en lugar de vencer a mitad de uso. El `AuthGuard` del gateway deja ese token nuevo en `request.token` para que el cliente lo levante.
 
-## Run tests
+Dos detalles de la implementación que no son obvios:
 
-```bash
-# unit tests
-$ npm run test
+- **Hay que sacar `iat` y `exp` del payload verificado antes de volver a firmar.** `jsonwebtoken` tira error si el payload ya los trae y además está seteado `signOptions.expiresIn`.
+- **Los errores se tiran como `RpcException({ status: 401, message })`.** La clave tiene que ser `status`, no `statusCode`, o el filtro global del gateway lo degrada a un 400 (que es el bug que todavía tiene `products-ms`).
 
-# e2e tests
-$ npm run test:e2e
+> ⚠️ El `AuthGuard` del gateway desestructura `{ user, token }` de la respuesta. Desestructurar algo que no es un objeto devuelve `undefined` **sin lanzar**, así que si la forma de retorno de `verifyUser` cambia, el guard **falla abierto**, no cerrado. Ya pasó una vez, mientras `verifyUser` todavía devolvía el token crudo: autenticaba cualquier token.
 
-# test coverage
-$ npm run test:cov
-```
+## 📋 Requisitos Previos
 
-## Deployment
+- **Node.js 22**
+- **npm** (este servicio usa npm, no pnpm)
+- **MongoDB** — Atlas o un contenedor local
+- **Docker** (para NATS, o para levantar todo el stack)
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+## 🛠️ Instalación
 
 ```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+cd auth-ms
+npm install
+npx prisma generate
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+## ⚙️ Variables de Entorno
 
-## Resources
+```bash
+cp .env.template .env
+```
 
-Check out a few resources that may come in handy when working with NestJS:
+```env
+PORT=3004
+NATS_SERVERS="nats://localhost:4222"
+JWT_SECRET=cambiame_por_un_secreto_largo
+DATABASE_URL=mongodb+srv://usuario:password@cluster.mongodb.net/AuthDB
+```
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+> `PORT` se valida pero **no se usa**: el servicio no escucha en ningún puerto. El `3004:3004` del compose es cosmético.
 
-## Support
+> `DATABASE_URL` **no está** en el schema de Joi, pero Prisma la necesita igual. Si falta, el servicio arranca y falla en la primera query.
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+`JWT_SECRET` tiene que ser el mismo que usa el resto del stack: bajo Docker llega desde el `.env` de la raíz.
 
-## Stay in touch
+## 🗄️ Base de datos (Prisma 6 + MongoDB)
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+```bash
+npx prisma generate
+npx prisma db push
+```
 
-## License
+### ⚠️ Este servicio está fijado en Prisma 6 a propósito
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+**Prisma 7 no soporta MongoDB.** La v7 hace obligatorios los driver adapters y no existe `@prisma/adapter-mongodb` — el paquete no está publicado en npm. Un cliente v7 contra un datasource `mongodb` *se genera* bien y después explota al construirse: *"PrismaClient was instantiated without any options. A driver adapter is required."*
+
+La recomendación oficial de Prisma es quedarse en v6 para MongoDB. Por eso acá `prisma` y `@prisma/client` están en `^6.19`, mientras `products-ms` y `orders-ms` van en 7.
+
+> **No "unifiques las versiones".** Un `npm update` acá rompe el servicio.
+
+Diferencias con los otros dos servicios que tienen Prisma:
+
+- **No hay migraciones.** `prisma migrate dev` no está soportado en MongoDB: el flujo es `prisma db push`.
+- El generador es `prisma-client-js` sin `output`, así que el import es `@prisma/client` (como `orders-ms`, no como `products-ms`).
+- **`schema.prisma` sí declara `url = env("DATABASE_URL")`** y **no hay `prisma.config.ts`** — ese archivo es de la forma v7 y se eliminó. Es justo al revés que en los servicios v7.
+- Los ids son ObjectIds: `id String @id @default(auto()) @map("_id") @db.ObjectId`.
+- Usa el **motor nativo** (`libquery_engine-...so.node`), no el compilador WASM de la v7. Por eso su imagen necesita `openssl`.
+
+## ▶️ Ejecución
+
+Lo normal es levantar todo el stack desde la raíz del proyecto:
+
+```bash
+docker compose up -d --build
+```
+
+Solo, con NATS corriendo:
+
+```bash
+npm run start:dev
+```
+
+## 🧪 Testing
+
+```bash
+npm test
+npm run test:e2e
+npm run test:cov
+```
+
+Smoke test rápido, con el stack levantado:
+
+```bash
+curl -s "localhost:8222/subsz?subs=1" | grep -c '"subject": "auth\.'   # esperás 3
+
+curl -s -X POST localhost:3001/api/auth/register -H 'Content-Type: application/json' \
+  -d '{"name":"Test","email":"test@test.com","password":"Abc123456!"}'
+```
+
+## ⚠️ Cosas a tener en cuenta
+
+**El `try/catch` de `AuthService` tiene que relanzar las `RpcException`.** Un `catch (error) { throw new RpcException({ status: 400, message: 'User login failed' }) }` pelado se come el `Invalid credentials` específico que se tiró adentro del `try` y lo reemplaza por el genérico. La forma correcta es `if (error instanceof RpcException) throw error;` primero, y recién después el genérico con `status: 500`.
+
+**`openssl` tiene que estar instalado en la etapa donde corre `prisma generate`**, no solo en la de runtime. Prisma lo usa para *detectar* qué motor emitir: sin él asume `openssl-1.1.x` y la imagen final (openssl 3.x) muere al arrancar con *"could not locate the Query Engine"*.
+
+**Los DTOs están duplicados** con los del gateway (`client-gateway/src/auth/dto`). Los dos lados corren `forbidNonWhitelisted`, así que un campo declarado de un solo lado se rechaza. Usan `@IsStrongPassword()`, o sea que una contraseña débil se rechaza en el gateway antes de llegar a NATS.
+
+**El índice único de `email` todavía no está aplicado.** Está declarado como `@unique` en el schema, pero hace falta correr `prisma db push` contra la base para que exista. Hasta entonces, los emails duplicados entran sin problema.
