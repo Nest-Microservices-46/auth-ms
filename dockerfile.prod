@@ -1,0 +1,86 @@
+# Imagen de producción de auth-ms.
+#
+# Dos cosas que no se pueden hacer de la forma obvia:
+#
+# 1) `npm prune --omit=dev` NO saca el CLI de prisma. @prisma/client lo declara como
+#    optional peerDependency (junto con typescript), así que npm lo considera parte
+#    del árbol de producción y lo conserva: 66M de prisma + 75M de @prisma/engines +
+#    34M de effect + 23M de typescript que se van a la imagen final. Por eso las deps
+#    de producción se instalan desde cero en su propia etapa, con `npm ci --omit=dev`.
+#
+# 2) El cliente generado vive en node_modules/.prisma/client, no en dist/. Se genera
+#    en la etapa de build y se copia a mano encima de las deps de producción.
+
+# ---------- deps: todas, para poder compilar ----------
+FROM node:22-alpine AS deps
+
+# bcrypt es nativo y no publica prebuilds para musl: en Alpine hay que compilarlo.
+# Estas herramientas quedan acá, no en la imagen final.
+RUN apk add --no-cache python3 make g++
+
+WORKDIR /usr/src/app
+
+COPY package*.json ./
+
+RUN npm ci
+
+# ---------- build: genera el cliente Prisma y compila ----------
+FROM node:22-alpine AS build
+
+# openssl acá no es opcional: `prisma generate` lo usa para detectar la versión de
+# libssl y elegir el motor. Sin él asume una y la imagen final busca otra, y muere
+# con "could not locate the Query Engine".
+RUN apk add --no-cache openssl
+
+WORKDIR /usr/src/app
+
+COPY --from=deps /usr/src/app/node_modules ./node_modules
+COPY . .
+
+RUN npx prisma generate
+RUN npm run build
+
+# ---------- prod-deps: sólo dependencies, sin el CLI ni su arrastre ----------
+FROM node:22-alpine AS prod-deps
+
+RUN apk add --no-cache python3 make g++
+
+WORKDIR /usr/src/app
+
+COPY package*.json ./
+
+# `--omit=dev` no alcanza, y `--omit=peer` tampoco: npm instala igual los optional
+# peers que están en el lockfile. Se borran a mano — son puro build-time, el runtime
+# sólo necesita @prisma/client + el cliente generado en .prisma.
+RUN npm ci --omit=dev \
+    && rm -rf node_modules/prisma \
+              node_modules/@prisma/engines \
+              node_modules/effect \
+              node_modules/typescript \
+              node_modules/.bin/prisma \
+              node_modules/.bin/tsc \
+              node_modules/.bin/tsserver \
+    # ~50M de motores WASM (cockroach/postgres/mysql/sqlserver/sqlite) que sirven
+    # para edge runtimes. Node usa el .so nativo de .prisma, y esto es Mongo.
+    && rm -rf node_modules/@prisma/client/runtime/query_engine_bg.* \
+              node_modules/@prisma/client/runtime/query_compiler_bg.*
+
+# ---------- final ----------
+FROM node:22-alpine
+
+# El query engine enlaza contra libssl en runtime.
+RUN apk add --no-cache openssl
+
+WORKDIR /usr/src/app
+
+ENV NODE_ENV=production
+
+COPY --from=prod-deps /usr/src/app/node_modules ./node_modules
+# El cliente generado va encima: @prisma/client sólo reexporta lo que hay acá.
+COPY --from=build /usr/src/app/node_modules/.prisma ./node_modules/.prisma
+COPY --from=build /usr/src/app/dist ./dist
+COPY package.json ./
+
+EXPOSE 3004
+
+CMD ["node", "dist/main.js"]
